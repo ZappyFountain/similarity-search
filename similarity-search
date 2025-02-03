@@ -1,0 +1,83 @@
+# -----------------------------
+# STEP 1: Model Training and Embedding Storage
+# -----------------------------
+
+# Load the pretrained ResNet34 model
+model = load_pretrained_model("ResNet34")
+
+# Use FastAI to find the optimal learning rate on the training dataset
+learning_rate = find_optimal_learning_rate(model, training_data)
+
+# Fine tune the model using the determined learning rate
+model = fine_tune_model(model, training_data, learning_rate)
+
+# Generate embeddings for each image in the training set using the fine-tuned model
+train_embeddings = {}  # a dictionary to store embeddings, keyed by image ID
+for image in training_data:
+    embedding = generate_embedding(model, image)
+    train_embeddings[image.id] = { 
+        "embedding": embedding, 
+        "diagnosis": image.diagnosis 
+    }
+
+# Save the training embeddings to a file for later retrieval
+store_embeddings(train_embeddings, "embeddings_file")
+
+# -----------------------------
+# STEP 2: Test Prediction and Similarity Retrieval
+# -----------------------------
+
+# For each test image, perform prediction and retrieve similar cases
+for test_image in test_dataset:
+    
+    # 2.1: Get base prediction and its probability from the fine-tuned ResNet34 model
+    base_pred, Pscore = model.predict(test_image)
+    
+    # 2.2: Generate the embedding for the test image
+    test_embedding = generate_embedding(model, test_image)
+    
+    # 2.3: Compute cosine similarity between the test embedding and each stored training embedding
+    similar_cases = []  # List to hold tuples of (similarity_score, diagnosis)
+    for each entry in train_embeddings:
+        train_embedding = entry["embedding"]
+        similarity_score = cosine_similarity(test_embedding, train_embedding)
+        diagnosis = entry["diagnosis"]
+        similar_cases.append((similarity_score, diagnosis))
+    
+    # 2.4: Sort the training images by descending similarity score and select the top N cases
+    sorted_similars = sort(similar_cases, key = similarity_score, order = descending)
+    top_N_similars = sorted_similars[0:N]
+
+    # -----------------------------
+    # STEP 3: Similarity-Based Weighted Adjustment and Final Prediction
+    # -----------------------------
+    
+    # 3.1: Compute normalized weights for each of the top N similar cases
+    total_similarity = sum(similarity_score for each (similarity_score, _) in top_N_similars)
+    weighted_agreement = 0
+    
+    # For each similar case, calculate its contribution toward agreement
+    for (similarity_score, diagnosis) in top_N_similars:
+        normalized_weight = similarity_score / total_similarity
+        
+        # Indicator function: 1 if the similar case's diagnosis agrees with the base prediction; else 0
+        if diagnosis == base_pred:
+            indicator = 1
+        else:
+            indicator = 0
+        
+        # Accumulate the weighted agreement
+        weighted_agreement += normalized_weight * indicator
+
+    # 3.2: Adjust the prediction threshold based on the weighted agreement.
+    # Note: base_threshold and adjustment_factor are hyperparameters found via grid search.
+    T_adjusted = base_threshold - adjustment_factor * (2 * weighted_agreement - 1)
+    
+    # 3.3: Final prediction: if the base prediction probability meets or exceeds the adjusted threshold, predict 1; otherwise, 0.
+    if Pscore >= T_adjusted:
+        final_prediction = 1
+    else:
+        final_prediction = 0
+
+    # 3.4: Output or store the final prediction for the test image
+    output(test_image.id, final_prediction)
